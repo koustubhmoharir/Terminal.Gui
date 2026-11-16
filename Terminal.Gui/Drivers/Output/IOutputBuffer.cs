@@ -195,4 +195,25 @@ public interface IOutputBuffer
     ///     trailing half of a previous wide character).
     /// </param>
     void SetWideGlyphReplacement (Rune column1ReplacementChar);
+
+    /// <summary>
+    ///     Hints that the rows from <paramref name="top"/> to <paramref name="top"/> + <paramref name="height"/> (exclusive)
+    ///     scroll up by <paramref name="lines"/> rows, so the output can scroll them on the terminal instead of resending them.
+    /// </summary>
+    /// <remarks>
+    ///     <para>
+    ///         The hint never changes <see cref="Contents"/>. Draw the desired content of the band as usual; the output
+    ///         compares every cell of the band with what the terminal shows and sends the cells that differ, so a band that is
+    ///         not redrawn still ends up correct. Output that cannot scroll ignores the hint.
+    ///     </para>
+    ///     <para>
+    ///         Requests apply in the order given, at the next write. <see cref="ClearContents()"/> and <see cref="SetSize"/>
+    ///         discard requests that are still pending.
+    ///     </para>
+    /// </remarks>
+    /// <param name="top">The first row of the band. Must be zero or greater.</param>
+    /// <param name="height">The number of rows in the band. Must be two or greater, and the band must fit within <see cref="Rows"/>.</param>
+    /// <param name="lines">The number of rows the band scrolls up. Must be greater than zero and less than <paramref name="height"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException">An argument is outside the range above.</exception>
+    void ScrollRowsUp (int top, int height, int lines) { }
 }

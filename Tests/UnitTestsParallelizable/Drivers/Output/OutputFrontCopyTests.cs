@@ -335,4 +335,414 @@ public class OutputFrontCopyTests
         // Assert
         Assert.Contains ("abcdefgh", output.GetLastOutput ());
     }
+
+    // Matches one CSI sequence at the position where the search starts.
+    private static readonly Regex _csiAt = new (@"\G\x1b\[([0-9;?]*)([@-~])");
+
+    // A ten-row, four-column screen where every row is "r<row>" padded with spaces.
+    private static OutputBufferImpl CreateRowsBuffer ()
+    {
+        OutputBufferImpl buffer = CreateBuffer (4, 10);
+
+        for (int row = 0; row < 10; row++)
+        {
+            DrawRow (buffer, row, $"r{row}");
+        }
+
+        return buffer;
+    }
+
+    private static void DrawRow (IOutputBuffer buffer, int row, string text) => Draw (buffer, 0, row, text.PadRight (buffer.Cols));
+
+    private static string [,] BlankScreen (int rows, int cols)
+    {
+        string [,] screen = new string [rows, cols];
+
+        for (int row = 0; row < rows; row++)
+        {
+            for (int col = 0; col < cols; col++)
+            {
+                screen [row, col] = " ";
+            }
+        }
+
+        return screen;
+    }
+
+    private static string [,] ScreenOf (IOutputBuffer buffer)
+    {
+        string [,] screen = new string [buffer.Rows, buffer.Cols];
+
+        for (int row = 0; row < buffer.Rows; row++)
+        {
+            for (int col = 0; col < buffer.Cols; col++)
+            {
+                screen [row, col] = buffer.Contents! [row, col].Grapheme;
+            }
+        }
+
+        return screen;
+    }
+
+    private static string ScreenText (string [,] screen)
+    {
+        StringBuilder text = new ();
+
+        for (int row = 0; row < screen.GetLength (0); row++)
+        {
+            for (int col = 0; col < screen.GetLength (1); col++)
+            {
+                text.Append (screen [row, col]);
+            }
+
+            text.Append ('\n');
+        }
+
+        return text.ToString ();
+    }
+
+    private static int [] ParseNumbers (string parameters) => parameters.Length == 0 ? [] : parameters.Split (';').Select (int.Parse).ToArray ();
+
+    // Replays one frame onto a screen of graphemes the way a terminal shows it. Handles the sequences the output writes:
+    // cursor position, scroll region (DECSTBM), scroll up (SU), and text. SGR changes no grapheme.
+    private static void Replay (string [,] screen, string frame)
+    {
+        int rows = screen.GetLength (0);
+        int cols = screen.GetLength (1);
+        int top = 0;
+        int bottom = rows - 1;
+        int row = 0;
+        int col = 0;
+        int index = 0;
+
+        while (index < frame.Length)
+        {
+            if (frame [index] != '\u001b')
+            {
+                screen [row, col] = frame [index].ToString ();
+                col++;
+                index++;
+
+                continue;
+            }
+
+            Match csi = _csiAt.Match (frame, index);
+
+            if (!csi.Success)
+            {
+                throw new NotSupportedException ("Replay supports only CSI sequences.");
+            }
+
+            index += csi.Length;
+            char final = csi.Groups [2].Value [0];
+            int [] numbers = ParseNumbers (csi.Groups [1].Value);
+
+            if (final == 'm')
+            {
+                continue;
+            }
+
+            if (final == 'H')
+            {
+                row = (numbers.Length > 0 ? numbers [0] : 1) - 1;
+                col = (numbers.Length > 1 ? numbers [1] : 1) - 1;
+
+                continue;
+            }
+
+            if (final == 'r')
+            {
+                top = numbers.Length == 0 ? 0 : numbers [0] - 1;
+                bottom = numbers.Length == 0 ? rows - 1 : numbers [1] - 1;
+                row = 0;
+                col = 0;
+
+                continue;
+            }
+
+            if (final == 'S')
+            {
+                int count = numbers.Length == 0 ? 1 : numbers [0];
+
+                for (int scroll = 0; scroll < count; scroll++)
+                {
+                    for (int scrollRow = top; scrollRow < bottom; scrollRow++)
+                    {
+                        for (int scrollCol = 0; scrollCol < cols; scrollCol++)
+                        {
+                            screen [scrollRow, scrollCol] = screen [scrollRow + 1, scrollCol];
+                        }
+                    }
+
+                    for (int scrollCol = 0; scrollCol < cols; scrollCol++)
+                    {
+                        screen [bottom, scrollCol] = " ";
+                    }
+                }
+
+                continue;
+            }
+
+            throw new NotSupportedException ($"Replay does not support CSI {final}.");
+        }
+    }
+
+    private const string ScrollTwoRowsSequence = "\u001b[3;8r\u001b[2S\u001b[r";
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_BandRedrawn_EmitsScrollBeforeCellsAndOnlyNewRowsAreSent ()
+    {
+        // Arrange
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        string [,] screen = BlankScreen (10, 4);
+        Replay (screen, WriteFrame (output, bytes, buffer));
+
+        // Rows 2..5 now hold what rows 4..7 held; rows 6 and 7 hold new text.
+        buffer.ScrollRowsUp (2, 6, 2);
+
+        for (int row = 2; row < 6; row++)
+        {
+            DrawRow (buffer, row, $"r{row + 2}");
+        }
+
+        DrawRow (buffer, 6, "n6");
+        DrawRow (buffer, 7, "n7");
+
+        // Act
+        string frame = WriteFrame (output, bytes, buffer);
+
+        // Assert
+        // DECSTBM over rows 3..8 (1-based), SU 2, then the margins are reset. All of it precedes the first cell.
+        Assert.StartsWith (ScrollTwoRowsSequence, frame, StringComparison.Ordinal);
+
+        // The shifted rows already show on the terminal after the scroll, so only the new rows are sent.
+        Assert.Equal ("n6  n7  ", VisibleText (frame));
+
+        Replay (screen, frame);
+        Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_BandNotRedrawn_CorrectsShiftedRowsOnScreen ()
+    {
+        // Arrange
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        string [,] screen = BlankScreen (10, 4);
+        Replay (screen, WriteFrame (output, bytes, buffer));
+
+        // The caller asks for the scroll but does not draw the band, so Contents still holds the old rows.
+        buffer.ScrollRowsUp (2, 6, 2);
+
+        // Act
+        string frame = WriteFrame (output, bytes, buffer);
+
+        // Assert
+        Assert.StartsWith (ScrollTwoRowsSequence, frame, StringComparison.Ordinal);
+
+        // The scroll put r4..r7 on rows 2..5, which differ from Contents. Replaying the frame must restore r2..r7.
+        Replay (screen, frame);
+        Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_RowsOutsideBand_AreNotAffected ()
+    {
+        // Arrange
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        string [,] screen = BlankScreen (10, 4);
+        Replay (screen, WriteFrame (output, bytes, buffer));
+
+        buffer.ScrollRowsUp (2, 6, 2);
+
+        for (int row = 2; row < 6; row++)
+        {
+            DrawRow (buffer, row, $"r{row + 2}");
+        }
+
+        DrawRow (buffer, 6, "n6");
+        DrawRow (buffer, 7, "n7");
+
+        // A changed cell above the band, then every row marked dirty: rows 8 and 9 are unchanged and must not be sent.
+        SetCell (buffer, 1, 0, "X");
+        MarkAllDirty (buffer);
+
+        // Act
+        string frame = WriteFrame (output, bytes, buffer);
+
+        // Assert
+        Assert.Equal ("Xn6  n7  ", VisibleText (frame));
+
+        Replay (screen, frame);
+        Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_TwoRequestsInOneFrame_AreAppliedInOrder ()
+    {
+        // Arrange
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        string [,] screen = BlankScreen (10, 4);
+        Replay (screen, WriteFrame (output, bytes, buffer));
+
+        // Two scrolls by two rows move rows 6 and 7 to rows 2 and 3. Rows 4..7 hold new text.
+        buffer.ScrollRowsUp (2, 6, 2);
+        buffer.ScrollRowsUp (2, 6, 2);
+        DrawRow (buffer, 2, "r6");
+        DrawRow (buffer, 3, "r7");
+        DrawRow (buffer, 4, "n4");
+        DrawRow (buffer, 5, "n5");
+        DrawRow (buffer, 6, "n6");
+        DrawRow (buffer, 7, "n7");
+
+        // Act
+        string frame = WriteFrame (output, bytes, buffer);
+
+        // Assert
+        Assert.StartsWith (ScrollTwoRowsSequence + ScrollTwoRowsSequence, frame, StringComparison.Ordinal);
+        Assert.Equal ("n4  n5  n6  n7  ", VisibleText (frame));
+
+        Replay (screen, frame);
+        Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
+    }
+
+    // Writes a ten-row frame, then a second frame in which rows 2..5 hold what rows 4..7 held and rows 6 and 7 hold new text.
+    // Returns the bytes of the second frame.
+    private static string RenderScrolledFrame (AppModel appModel, bool legacy, bool requestScroll)
+    {
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes, appModel);
+        output.IsLegacyConsole = legacy;
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        WriteFrame (output, bytes, buffer);
+
+        if (requestScroll)
+        {
+            buffer.ScrollRowsUp (2, 6, 2);
+        }
+
+        for (int row = 2; row < 6; row++)
+        {
+            DrawRow (buffer, row, $"r{row + 2}");
+        }
+
+        DrawRow (buffer, 6, "n6");
+        DrawRow (buffer, 7, "n7");
+
+        return WriteFrame (output, bytes, buffer);
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_InlineMode_EmitsNothingAndMatchesOutputWithoutRequest ()
+    {
+        // Arrange
+        string withoutRequest = RenderScrolledFrame (AppModel.Inline, false, false);
+
+        // Act
+        string withRequest = RenderScrolledFrame (AppModel.Inline, false, true);
+
+        // Assert
+        Assert.Equal (withoutRequest, withRequest);
+        Assert.DoesNotContain ("\u001b[2S", withRequest, StringComparison.Ordinal);
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_LegacyConsole_EmitsNothingAndMatchesOutputWithoutRequest ()
+    {
+        // Arrange
+        string withoutRequest = RenderScrolledFrame (AppModel.FullScreen, true, false);
+
+        // Act
+        string withRequest = RenderScrolledFrame (AppModel.FullScreen, true, true);
+
+        // Assert
+        Assert.Equal (withoutRequest, withRequest);
+        Assert.DoesNotContain ("\u001b[2S", withRequest, StringComparison.Ordinal);
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_AfterClearContents_IsDroppedAndEveryCellIsSent ()
+    {
+        // Arrange
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        WriteFrame (output, bytes, buffer);
+
+        buffer.ScrollRowsUp (2, 6, 2);
+        buffer.ClearContents ();
+
+        for (int row = 0; row < 10; row++)
+        {
+            DrawRow (buffer, row, $"r{row}");
+        }
+
+        // Act
+        string frame = WriteFrame (output, bytes, buffer);
+
+        // Assert
+        Assert.DoesNotContain ("\u001b[2S", frame, StringComparison.Ordinal);
+        Assert.Equal (string.Concat (Enumerable.Range (0, 10).Select (row => $"r{row}  ")), VisibleText (frame));
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_AfterSetSize_IsDroppedAndEveryCellIsSent ()
+    {
+        // Arrange
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateRowsBuffer ();
+        WriteFrame (output, bytes, buffer);
+
+        buffer.ScrollRowsUp (2, 6, 2);
+        buffer.SetSize (4, 10);
+
+        for (int row = 0; row < 10; row++)
+        {
+            DrawRow (buffer, row, $"r{row}");
+        }
+
+        // Act
+        string frame = WriteFrame (output, bytes, buffer);
+
+        // Assert
+        Assert.DoesNotContain ("\u001b[2S", frame, StringComparison.Ordinal);
+        Assert.Equal (string.Concat (Enumerable.Range (0, 10).Select (row => $"r{row}  ")), VisibleText (frame));
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_InvalidArguments_ThrowArgumentOutOfRangeException ()
+    {
+        // Arrange
+        OutputBufferImpl buffer = CreateBuffer (4, 10);
+
+        // Act and Assert
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (0, 1, 1));   // height below two
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (0, 4, 4));   // lines equal to height
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (0, 4, 5));   // lines above height
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (0, 4, 0));   // no lines
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (0, 4, -1));  // negative lines
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (-1, 4, 1));  // negative top
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (8, 4, 1));   // band runs past the last row
+        Assert.Throws<ArgumentOutOfRangeException> (() => buffer.ScrollRowsUp (10, 2, 1));  // band starts past the last row
+
+        // The band that ends exactly on the last row is valid.
+        buffer.ScrollRowsUp (6, 4, 1);
+    }
 }

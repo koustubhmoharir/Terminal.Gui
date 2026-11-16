@@ -333,6 +333,69 @@ public abstract class OutputBase
         return true;
     }
 
+    // Scrolls each requested band on the terminal, in request order, and moves the front copy with it. Without the front
+    // copy nothing is emitted and the band is drawn as it always was.
+    private void ApplyRowScrolls (IOutputBuffer buffer, (int Top, int Height, int Lines) [] rowScrolls, bool skipUnchanged)
+    {
+        if (!skipUnchanged)
+        {
+            return;
+        }
+
+        foreach ((int top, int height, int lines) in rowScrolls)
+        {
+            // DECSTBM confines SU to the band. Resetting the margins moves the cursor home; every row that is written starts
+            // with an absolute cursor move, so nothing relies on the cursor position left by the scroll.
+            WriteEncodedString ($"{EscSeqUtils.CSI}{top + 1};{top + height}r{EscSeqUtils.CSI}{lines}S{EscSeqUtils.CSI}r");
+
+            ShiftFrontBand (top, height, lines);
+            MarkBandUrlsStale (top, height);
+            MarkBandDirty (buffer, top, height);
+        }
+    }
+
+    // Moves the front copy's band up with the terminal. The bottom lines of the band hold rows the scroll filled, so they are
+    // unknown until they are drawn.
+    private void ShiftFrontBand (int top, int height, int lines)
+    {
+        int cols = _front!.GetLength (1);
+
+        Array.Copy (_front, (top + lines) * cols, _front, top * cols, (height - lines) * cols);
+        Array.Copy (_frontRowKnown, top + lines, _frontRowKnown, top, height - lines);
+        Array.Fill (_frontRowKnown, false, top + height - lines, lines);
+    }
+
+    // A scroll carries each hyperlink with its cell, so the OSC 8 state recorded for the band no longer describes it. If any
+    // band row had links, every band row is treated as having had links. Each row then closes its link state, and no row is
+    // skipped this frame, so every dirty cell in the band is sent.
+    private void MarkBandUrlsStale (int top, int height)
+    {
+        if (!Enumerable.Range (top, height).Any (_rowsWithUrls.Contains))
+        {
+            return;
+        }
+
+        for (int row = top; row < top + height; row++)
+        {
+            _rowsWithUrls.Add (row);
+        }
+    }
+
+    // Marks the band dirty so the next row loop compares every cell with the shifted front copy and sends the ones that
+    // differ. Cells that match are consumed without output. Cells the caller did not redraw are compared too.
+    private static void MarkBandDirty (IOutputBuffer buffer, int top, int height)
+    {
+        for (int row = top; row < top + height; row++)
+        {
+            buffer.DirtyLines [row] = true;
+
+            for (int col = 0; col < buffer.Cols; col++)
+            {
+                buffer.Contents! [row, col].IsDirty = true;
+            }
+        }
+    }
+
     // Marks every row unknown so the next frame sends each dirty cell in them.
     private void InvalidateFrontCopy ()
     {
@@ -429,6 +492,10 @@ public abstract class OutputBase
         {
             InvalidateFrontCopy ();
         }
+
+        // Scrolls come before any cell output, so every cell written below is positioned after them.
+        (int Top, int Height, int Lines) [] rowScrolls = buffer is OutputBufferImpl scrollBuffer ? scrollBuffer.TakePendingRowScrolls () : [];
+        ApplyRowScrolls (buffer, rowScrolls, skipUnchanged);
 
         // Erase Kitty placements for images that were present last frame but are gone now. Kitty
         // placements persist until explicitly deleted, so removed images would otherwise linger.

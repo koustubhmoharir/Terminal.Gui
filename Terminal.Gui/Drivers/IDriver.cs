@@ -351,6 +351,20 @@ public interface IDriver : IDisposable
     /// <param name="rune">The Rune used to fill the rectangle</param>
     void FillRect (Rectangle rect, Rune rune = default);
 
+    /// <summary>
+    ///     Hints that the rows from <paramref name="top"/> to <paramref name="top"/> + <paramref name="height"/> (exclusive)
+    ///     scroll up by <paramref name="lines"/> rows, so the terminal can scroll them instead of resending them.
+    /// </summary>
+    /// <remarks>
+    ///     The hint never changes <see cref="IDriver.Contents"/>. Draw the band as usual: the output still compares each cell
+    ///     with what the terminal shows, so a band that is not redrawn is corrected too. Drivers that cannot scroll ignore the
+    ///     hint. See <see cref="IOutputBuffer.ScrollRowsUp"/> for the argument rules.
+    /// </remarks>
+    /// <param name="top">The first row of the band.</param>
+    /// <param name="height">The number of rows in the band.</param>
+    /// <param name="lines">The number of rows the band scrolls up.</param>
+    void ScrollRowsUp (int top, int height, int lines) { }
+
     /// <summary>Selects the specified attribute as the attribute to use for future calls to AddRune and AddString.</summary>
     /// <remarks>Implementations should call <c>base.SetAttribute(c)</c>.</remarks>
     /// <param name="c">C.</param>

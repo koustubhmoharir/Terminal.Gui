@@ -45,6 +45,9 @@ public class OutputBufferImpl : IOutputBuffer
     private Region? _clip;
     private readonly List<RasterImageCommand> _rasterImages = [];
 
+    // Row scrolls requested since the last write, in request order. A full redraw (ClearContents, SetSize) discards them.
+    private readonly List<(int Top, int Height, int Lines)> _pendingRowScrolls = [];
+
     /// <summary>
     ///     The contents of the application output. The driver outputs this buffer to the terminal when
     ///     UpdateScreen is called.
@@ -410,6 +413,39 @@ public class OutputBufferImpl : IOutputBuffer
         }
     }
 
+    /// <inheritdoc/>
+    /// <exception cref="ArgumentOutOfRangeException">An argument is outside the range documented on <see cref="IOutputBuffer.ScrollRowsUp"/>.</exception>
+    public void ScrollRowsUp (int top, int height, int lines)
+    {
+        lock (_contentsLock)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative (top);
+            ArgumentOutOfRangeException.ThrowIfLessThan (height, 2);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan (height, _rows - top);
+            ArgumentOutOfRangeException.ThrowIfLessThan (lines, 1);
+            ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual (lines, height);
+
+            _pendingRowScrolls.Add ((top, height, lines));
+        }
+    }
+
+    // Hands the pending row scrolls to the output in request order, and forgets them.
+    internal (int Top, int Height, int Lines) [] TakePendingRowScrolls ()
+    {
+        lock (_contentsLock)
+        {
+            if (_pendingRowScrolls.Count == 0)
+            {
+                return [];
+            }
+
+            (int Top, int Height, int Lines) [] scrolls = [.. _pendingRowScrolls];
+            _pendingRowScrolls.Clear ();
+
+            return scrolls;
+        }
+    }
+
     // A raster image owns the blank cells in its visible destination. Keep those cells clean so
     // Sixel output is not erased by normal cell rendering; OutputBase decides when protocol-specific
     // transparent blanks must be emitted for Kitty's below-text placement model.
@@ -522,6 +558,7 @@ public class OutputBufferImpl : IOutputBuffer
     private void ClearContentsCore (bool initiallyDirty)
     {
         Contents = new Cell [Rows, Cols];
+        _pendingRowScrolls.Clear ();
 
         // TODO: ClearContents should not clear the clip; it should only clear the contents. Move clearing it elsewhere.
         Clip = new Region (Screen);

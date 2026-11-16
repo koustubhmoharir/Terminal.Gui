@@ -503,6 +503,9 @@ internal class DriverImpl : IDriver, ICursorApplyReporter
     public void FillRect (Rectangle rect, Rune rune = default) => _outputBuffer.FillRect (rect, rune);
 
     /// <inheritdoc/>
+    public void ScrollRowsUp (int top, int height, int lines) => _outputBuffer.ScrollRowsUp (top, height, lines);
+
+    /// <inheritdoc/>
     public Attribute SetAttribute (Attribute newAttribute)
     {
         Attribute currentAttribute = _outputBuffer.CurrentAttribute;
