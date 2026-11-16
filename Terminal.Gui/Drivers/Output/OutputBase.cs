@@ -12,6 +12,9 @@ public abstract class OutputBase
     // Longer gaps end the run and the next run starts with a cursor move.
     private const int MaxGap = 8;
 
+    // Estimated cost of a row scroll's own sequences, in cells: about three cells' worth of output.
+    private const int ScrollSequenceCost = 3;
+
     /// <summary>
     ///     Whether the last <c>SetCursor</c> call reached the terminal. Subclasses reset it when a call starts and set it
     ///     only after the cursor write succeeded; <c>SetCursor</c> can return without writing (inline placement unknown,
@@ -344,6 +347,13 @@ public abstract class OutputBase
 
         foreach ((int top, int height, int lines) in rowScrolls)
         {
+            // A scroll leaves its exposed rows unknown, so they are resent in full. It is worth it only when that costs less than
+            // sending the band without it. Both outcomes compare every dirty cell, so this estimate never affects correctness.
+            if (!IsScrollCheaper (buffer, top, height, lines))
+            {
+                continue;
+            }
+
             // DECSTBM confines SU to the band. Resetting the margins moves the cursor home; every row that is written starts
             // with an absolute cursor move, so nothing relies on the cursor position left by the scroll.
             WriteEncodedString ($"{EscSeqUtils.CSI}{top + 1};{top + height}r{EscSeqUtils.CSI}{lines}S{EscSeqUtils.CSI}r");
@@ -352,6 +362,61 @@ public abstract class OutputBase
             MarkBandUrlsStale (top, height);
             MarkBandDirty (buffer, top, height);
         }
+    }
+
+    // Estimates whether scrolling the band costs fewer cells than sending it without the scroll. Without the scroll, each band
+    // row is compared with the front as it is now. With it, each row is compared with the front row the scroll moves up, and
+    // the bottom lines the scroll fills count in full. This is only an estimate: it ignores URLs, and the fixed cost stands in
+    // for the scroll sequence. The front is evaluated as it is at this point, after any earlier scroll applied this frame.
+    private bool IsScrollCheaper (IOutputBuffer buffer, int top, int height, int lines)
+    {
+        Cell [,] contents = buffer.Contents!;
+        int cols = buffer.Cols;
+        int withoutCost = 0;
+
+        for (int row = top; row < top + height; row++)
+        {
+            withoutCost += CountUnskippedCells (contents, row, row, cols);
+        }
+
+        int withCost = ScrollSequenceCost;
+
+        for (int row = top; row < top + height - lines; row++)
+        {
+            withCost += CountUnskippedCells (contents, row, row + lines, cols);
+
+            if (withCost >= withoutCost)
+            {
+                return false;
+            }
+        }
+
+        // The bottom lines hold rows the scroll filled, which are unknown until drawn.
+        withCost += lines * cols;
+
+        return withCost < withoutCost;
+    }
+
+    // Counts the cells of a band row that would not be skipped when compared with the front row frontRow. Every cell counts
+    // when that front row is unknown.
+    private int CountUnskippedCells (Cell [,] contents, int row, int frontRow, int cols)
+    {
+        if (!_frontRowKnown [frontRow])
+        {
+            return cols;
+        }
+
+        int count = 0;
+
+        for (int col = 0; col < cols; col++)
+        {
+            if (!IsSameCell (_front! [frontRow, col], contents [row, col]))
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     // Moves the front copy's band up with the terminal. The bottom lines of the band hold rows the scroll filled, so they are
@@ -423,10 +488,11 @@ public abstract class OutputBase
 
     // True when sending the cell would emit exactly what the front records, so the terminal already shows it.
     // A cell with no attribute, an empty grapheme, or a column a wide glyph covers is never considered the same.
-    private bool IsSameAsFront (int row, int col, Cell cell)
-    {
-        Cell front = _front! [row, col];
+    private bool IsSameAsFront (int row, int col, Cell cell) => IsSameCell (_front! [row, col], cell);
 
+    // The comparison behind IsSameAsFront, for a front cell taken from any row.
+    private static bool IsSameCell (Cell front, Cell cell)
+    {
         if (string.IsNullOrEmpty (cell.Grapheme) || !string.Equals (front.Grapheme, cell.Grapheme, StringComparison.Ordinal))
         {
             return false;

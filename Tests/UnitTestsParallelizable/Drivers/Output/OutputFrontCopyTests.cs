@@ -339,18 +339,22 @@ public class OutputFrontCopyTests
     // Matches one CSI sequence at the position where the search starts.
     private static readonly Regex _csiAt = new (@"\G\x1b\[([0-9;?]*)([@-~])");
 
-    // A ten-row, four-column screen where every row is "r<row>" padded with spaces.
+    // A ten-row, four-column screen where every row is RowText (row). Each cell of a row differs from the cell at the
+    // same column of every other row, so a band shifted by a scroll differs in every cell unless it really is shifted.
     private static OutputBufferImpl CreateRowsBuffer ()
     {
         OutputBufferImpl buffer = CreateBuffer (4, 10);
 
         for (int row = 0; row < 10; row++)
         {
-            DrawRow (buffer, row, $"r{row}");
+            DrawRow (buffer, row, RowText (row));
         }
 
         return buffer;
     }
+
+    // Four copies of the row's digit, so no two rows share a cell.
+    private static string RowText (int row) => new ((char)('0' + row), 4);
 
     private static void DrawRow (IOutputBuffer buffer, int row, string text) => Draw (buffer, 0, row, text.PadRight (buffer.Cols));
 
@@ -505,7 +509,7 @@ public class OutputFrontCopyTests
 
         for (int row = 2; row < 6; row++)
         {
-            DrawRow (buffer, row, $"r{row + 2}");
+            DrawRow (buffer, row, RowText (row + 2));
         }
 
         DrawRow (buffer, 6, "n6");
@@ -527,7 +531,7 @@ public class OutputFrontCopyTests
 
     // Claude - Haiku 5.5
     [Fact]
-    public void ScrollRowsUp_BandNotRedrawn_CorrectsShiftedRowsOnScreen ()
+    public void ScrollRowsUp_BottomRowsNotRedrawn_CorrectsRowsOnScreen ()
     {
         // Arrange
         StringBuilder bytes = new ();
@@ -536,8 +540,15 @@ public class OutputFrontCopyTests
         string [,] screen = BlankScreen (10, 4);
         Replay (screen, WriteFrame (output, bytes, buffer));
 
-        // The caller asks for the scroll but does not draw the band, so Contents still holds the old rows.
+        // The caller asks for the scroll and redraws rows 2..5 as shifted, but not rows 6 and 7, which still hold r6 and r7.
+        // A scroll is worth its cost only when the shifted rows match, so this scroll is applied, and the rows it leaves
+        // unknown must be corrected from Contents.
         buffer.ScrollRowsUp (2, 6, 2);
+
+        for (int row = 2; row < 6; row++)
+        {
+            DrawRow (buffer, row, RowText (row + 2));
+        }
 
         // Act
         string frame = WriteFrame (output, bytes, buffer);
@@ -545,7 +556,7 @@ public class OutputFrontCopyTests
         // Assert
         Assert.StartsWith (ScrollTwoRowsSequence, frame, StringComparison.Ordinal);
 
-        // The scroll put r4..r7 on rows 2..5, which differ from Contents. Replaying the frame must restore r2..r7.
+        // The scroll put r4..r7 on rows 2..5, and rows 6 and 7 are unknown, so they are sent. Replaying must restore r2..r7.
         Replay (screen, frame);
         Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
     }
@@ -565,7 +576,7 @@ public class OutputFrontCopyTests
 
         for (int row = 2; row < 6; row++)
         {
-            DrawRow (buffer, row, $"r{row + 2}");
+            DrawRow (buffer, row, RowText (row + 2));
         }
 
         DrawRow (buffer, 6, "n6");
@@ -585,6 +596,69 @@ public class OutputFrontCopyTests
         Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
     }
 
+    // Ten 40-column rows that differ only in their three-digit number.
+    private static OutputBufferImpl CreateLinesBuffer ()
+    {
+        OutputBufferImpl buffer = CreateBuffer (40, 10);
+
+        for (int row = 0; row < 10; row++)
+        {
+            DrawRow (buffer, row, LineText (row));
+        }
+
+        return buffer;
+    }
+
+    private static string LineText (int number) => $"line {number:000} " + new string ('x', 31);
+
+    // Redraws rows 2..7 as the band shifted by two rows, with rows 6 and 7 holding new lines, and returns the frame.
+    private static string RedrawNearIdenticalBand (AnsiOutput output, StringBuilder bytes, OutputBufferImpl buffer, bool requestScroll)
+    {
+        if (requestScroll)
+        {
+            buffer.ScrollRowsUp (2, 6, 2);
+        }
+
+        for (int row = 2; row < 6; row++)
+        {
+            DrawRow (buffer, row, LineText (row + 2));
+        }
+
+        DrawRow (buffer, 6, LineText (10));
+        DrawRow (buffer, 7, LineText (11));
+
+        return WriteFrame (output, bytes, buffer);
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void ScrollRowsUp_NearIdenticalRows_ScrollIsNotEmittedAndOutputMatchesNoRequest ()
+    {
+        // Arrange
+        // Without the scroll only a few digits differ, while the scroll would leave two full rows to resend.
+        StringBuilder bytesWithout = new ();
+        AnsiOutput outputWithout = CreateTerminal (bytesWithout);
+        OutputBufferImpl bufferWithout = CreateLinesBuffer ();
+        WriteFrame (outputWithout, bytesWithout, bufferWithout);
+
+        StringBuilder bytes = new ();
+        AnsiOutput output = CreateTerminal (bytes);
+        OutputBufferImpl buffer = CreateLinesBuffer ();
+        string [,] screen = BlankScreen (10, 40);
+        Replay (screen, WriteFrame (output, bytes, buffer));
+
+        // Act
+        string frameWithout = RedrawNearIdenticalBand (outputWithout, bytesWithout, bufferWithout, false);
+        string frame = RedrawNearIdenticalBand (output, bytes, buffer, true);
+
+        // Assert
+        Assert.DoesNotContain ("\u001b[2S", frame, StringComparison.Ordinal);
+        Assert.Equal (frameWithout, frame);
+
+        Replay (screen, frame);
+        Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
+    }
+
     // Claude - Haiku 5.5
     [Fact]
     public void ScrollRowsUp_TwoRequestsInOneFrame_AreAppliedInOrder ()
@@ -596,13 +670,16 @@ public class OutputFrontCopyTests
         string [,] screen = BlankScreen (10, 4);
         Replay (screen, WriteFrame (output, bytes, buffer));
 
-        // Two scrolls by two rows move rows 6 and 7 to rows 2 and 3. Rows 4..7 hold new text.
-        buffer.ScrollRowsUp (2, 6, 2);
-        buffer.ScrollRowsUp (2, 6, 2);
-        DrawRow (buffer, 2, "r6");
-        DrawRow (buffer, 3, "r7");
-        DrawRow (buffer, 4, "n4");
-        DrawRow (buffer, 5, "n5");
+        // Two bands, each scrolled by two rows, in one frame. Each band is judged alone, so each must be worth scrolling:
+        // rows 0..3 hold what rows 2..5 held, and rows 4..7 hold what rows 6..9 held, and the new rows 2, 3, 6 and 7 hold new text.
+        buffer.ScrollRowsUp (0, 4, 2);
+        buffer.ScrollRowsUp (4, 4, 2);
+        DrawRow (buffer, 0, RowText (2));
+        DrawRow (buffer, 1, RowText (3));
+        DrawRow (buffer, 2, "n2");
+        DrawRow (buffer, 3, "n3");
+        DrawRow (buffer, 4, RowText (6));
+        DrawRow (buffer, 5, RowText (7));
         DrawRow (buffer, 6, "n6");
         DrawRow (buffer, 7, "n7");
 
@@ -610,8 +687,9 @@ public class OutputFrontCopyTests
         string frame = WriteFrame (output, bytes, buffer);
 
         // Assert
-        Assert.StartsWith (ScrollTwoRowsSequence + ScrollTwoRowsSequence, frame, StringComparison.Ordinal);
-        Assert.Equal ("n4  n5  n6  n7  ", VisibleText (frame));
+        // DECSTBM over rows 1..4 and then rows 5..8 (1-based), each followed by SU 2 and the margin reset, in request order.
+        Assert.StartsWith ("\u001b[1;4r\u001b[2S\u001b[r\u001b[5;8r\u001b[2S\u001b[r", frame, StringComparison.Ordinal);
+        Assert.Equal ("n2  n3  n6  n7  ", VisibleText (frame));
 
         Replay (screen, frame);
         Assert.Equal (ScreenText (ScreenOf (buffer)), ScreenText (screen));
@@ -634,7 +712,7 @@ public class OutputFrontCopyTests
 
         for (int row = 2; row < 6; row++)
         {
-            DrawRow (buffer, row, $"r{row + 2}");
+            DrawRow (buffer, row, RowText (row + 2));
         }
 
         DrawRow (buffer, 6, "n6");
@@ -688,7 +766,7 @@ public class OutputFrontCopyTests
 
         for (int row = 0; row < 10; row++)
         {
-            DrawRow (buffer, row, $"r{row}");
+            DrawRow (buffer, row, RowText (row));
         }
 
         // Act
@@ -696,7 +774,7 @@ public class OutputFrontCopyTests
 
         // Assert
         Assert.DoesNotContain ("\u001b[2S", frame, StringComparison.Ordinal);
-        Assert.Equal (string.Concat (Enumerable.Range (0, 10).Select (row => $"r{row}  ")), VisibleText (frame));
+        Assert.Equal (string.Concat (Enumerable.Range (0, 10).Select (row => RowText (row))), VisibleText (frame));
     }
 
     // Claude - Haiku 5.5
@@ -714,7 +792,7 @@ public class OutputFrontCopyTests
 
         for (int row = 0; row < 10; row++)
         {
-            DrawRow (buffer, row, $"r{row}");
+            DrawRow (buffer, row, RowText (row));
         }
 
         // Act
@@ -722,7 +800,7 @@ public class OutputFrontCopyTests
 
         // Assert
         Assert.DoesNotContain ("\u001b[2S", frame, StringComparison.Ordinal);
-        Assert.Equal (string.Concat (Enumerable.Range (0, 10).Select (row => $"r{row}  ")), VisibleText (frame));
+        Assert.Equal (string.Concat (Enumerable.Range (0, 10).Select (row => RowText (row))), VisibleText (frame));
     }
 
     // Claude - Haiku 5.5
