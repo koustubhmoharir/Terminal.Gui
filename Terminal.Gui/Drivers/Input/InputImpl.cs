@@ -70,10 +70,11 @@ public abstract class InputImpl<TInputRecord> : IInput<TInputRecord>
 
                 effectiveToken.ThrowIfCancellationRequested ();
 
-                // Throttle the input loop to avoid CPU spinning when no input is available
-                // This is especially important when multiple ApplicationImpl instances are created
-                // in parallel tests without calling Shutdown() - prevents thread pool exhaustion
-                Task.Delay (20, effectiveToken).Wait (effectiveToken);
+                // Throttle the input loop to avoid CPU spinning when no input is available.
+                // Block on the token's wait handle instead of Task.Delay (...).Wait (): the latter wakes a thread-pool
+                // thread for the timer and then the blocked thread, and the pool spins looking for work after each
+                // wake-up, which costs several percent of a core in an idle app at 50 polls per second.
+                effectiveToken.WaitHandle.WaitOne (20);
             }
             while (!effectiveToken.IsCancellationRequested);
         }

@@ -103,7 +103,9 @@ public class ApplicationMainLoop<TInputRecord> : IApplicationMainLoop<TInputReco
 
         if (sleepFor.Milliseconds > 0)
         {
-            Task.Delay (sleepFor).Wait ();
+            // Thread.Sleep, not Task.Delay (...).Wait (): this thread blocks either way, and the timer task wakes the
+            // thread pool on every iteration, which spins looking for work after each wake-up.
+            Thread.Sleep (sleepFor);
         }
     }
 
