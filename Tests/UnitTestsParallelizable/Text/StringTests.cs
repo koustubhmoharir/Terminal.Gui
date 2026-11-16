@@ -16,6 +16,20 @@ public class StringTests
         Assert.Equal (expected, str.GetColumns (ignoreLessThanZero));
     }
 
+    // Claude - Haiku 5.5
+    [Theory]
+    [InlineData ("a", true, 1)]
+    [InlineData ("你", true, 2)]
+    [InlineData ("́", true, 0)]
+    [InlineData ("\u0007", true, 0)]
+    [InlineData ("\u0007", false, -1)]
+    public void TestGetColumns_SingleChar_Repeated_Calls_Return_Same_Width (string str, bool ignoreLessThanZero, int expected)
+    {
+        // First call fills the per-char width cache, second call reads it.
+        Assert.Equal (expected, str.GetColumns (ignoreLessThanZero));
+        Assert.Equal (expected, str.GetColumns (ignoreLessThanZero));
+    }
+
     [Fact]
     public void TestGetColumns_Null ()
     {

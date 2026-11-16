@@ -5,6 +5,14 @@ namespace Terminal.Gui.Text;
 /// <summary>Extensions to <see cref="string"/> to support TUI text manipulation.</summary>
 public static class StringExtensions
 {
+    // Sentinel for a single-char width that has not been computed yet. Rune widths are -1 to 2, so no real width collides.
+    private const sbyte UnknownWidth = sbyte.MinValue;
+
+    // Per-char cache of the raw Rune.GetColumns width for single-char strings, one entry per UTF-16 code unit (64 KB).
+    // Allocated eagerly and filled with UnknownWidth. The width depends only on the char (Wcwidth exposes no runtime-configurable
+    // state), so entries never go stale. Concurrent threads may compute the same entry and store the same value: a benign race.
+    private static readonly sbyte [] _singleCharWidths = CreateSingleCharWidthCache ();
+
     /// <summary>Unpacks the last UTF-8 encoding in the string.</summary>
     /// <remarks>This is a Terminal.Gui extension method to <see cref="string"/> to support TUI text manipulation.</remarks>
     /// <param name="str">The string to decode.</param>
@@ -65,7 +73,7 @@ public static class StringExtensions
         // Fast path: renderers measure one cell at a time; avoid allocating a grapheme enumerator.
         if (str.Length == 1 && !char.IsSurrogate (str [0]))
         {
-            int width = new Rune (str [0]).GetColumns ();
+            int width = GetSingleCharWidth (str [0]);
 
             return ignoreLessThanZero && width < 0 ? 0 : Math.Min (width, 2);
         }
@@ -78,6 +86,30 @@ public static class StringExtensions
         }
 
         return total;
+    }
+
+    // Returns the raw Rune.GetColumns width of a non-surrogate char, computing and caching it on first use.
+    private static int GetSingleCharWidth (char c)
+    {
+        sbyte width = _singleCharWidths [c];
+
+        if (width != UnknownWidth)
+        {
+            return width;
+        }
+
+        width = (sbyte)new Rune (c).GetColumns ();
+        _singleCharWidths [c] = width;
+
+        return width;
+    }
+
+    private static sbyte [] CreateSingleCharWidthCache ()
+    {
+        sbyte [] cache = new sbyte [char.MaxValue + 1];
+        Array.Fill (cache, UnknownWidth);
+
+        return cache;
     }
 
     /// <summary>Gets the number of runes in the string.</summary>

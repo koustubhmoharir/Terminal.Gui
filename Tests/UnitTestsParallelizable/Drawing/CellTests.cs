@@ -178,4 +178,52 @@ public class CellTests
         // And if your Grapheme setter normalizes, assignment should throw as well
         Assert.Throws<ArgumentException> (() => new Cell () { Grapheme = s });
     }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [InlineData ("Å")]
+    [InlineData ("─")]
+    [InlineData ("é")]
+    public void Grapheme_Single_Char_Keeps_Value_On_First_And_Cached_Assignment (string grapheme)
+    {
+        var cell = new Cell { Grapheme = grapheme };
+
+        Assert.Equal (grapheme, cell.Grapheme);
+
+        // Second assignment takes the cached path.
+        cell.Grapheme = grapheme;
+
+        Assert.Equal (grapheme, cell.Grapheme);
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void Grapheme_Singleton_Not_Normalized_Becomes_FormC_On_Every_Assignment ()
+    {
+        // U+212B ANGSTROM SIGN normalizes to U+00C5 in FormC.
+        Cell cell = new () { Grapheme = "Å" };
+
+        Assert.Equal ("Å", cell.Grapheme);
+
+        // Second assignment takes the cached path and must still normalize.
+        cell.Grapheme = "Å";
+
+        Assert.Equal ("Å", cell.Grapheme);
+    }
+
+    // Claude - Haiku 5.5
+    [Fact]
+    public void Grapheme_Lone_Surrogate_Throws_ArgumentException ()
+    {
+        // Create the lone high surrogate at runtime (safe)
+        string s = new string ((char)0xD800, 1);
+
+        Assert.Throws<ArgumentException> (() => new Cell { Grapheme = s });
+
+        // Repeated assignment must still throw.
+        Cell cell = new ();
+
+        Assert.Throws<ArgumentException> (() => cell.Grapheme = s);
+        Assert.Throws<ArgumentException> (() => cell.Grapheme = s);
+    }
 }

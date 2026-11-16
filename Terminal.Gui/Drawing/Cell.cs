@@ -7,6 +7,15 @@ namespace Terminal.Gui.Drawing;
 /// </summary>
 public record struct Cell (Attribute? Attribute = null, bool IsDirty = false, string Grapheme = "")
 {
+    // Per-char cache of whether a single-char string is already FormC. One byte per UTF-16 code unit (64 KB), allocated
+    // eagerly: a lazy allocation would need a null check on every assignment and an extra race, and 64 KB is negligible for
+    // a TUI process. Entries are filled on first use. Concurrent threads may compute the same entry; they store the same
+    // value, so a benign race is acceptable.
+    private const byte SingleCharUnknown = 0;
+    private const byte SingleCharNormalized = 1;
+    private const byte SingleCharNotNormalized = 2;
+    private static readonly byte [] _singleCharFormC = new byte [char.MaxValue + 1];
+
     /// <summary>The attributes to use when drawing the Glyph.</summary>
     public Attribute? Attribute { get; set; } = Attribute;
 
@@ -36,6 +45,15 @@ public record struct Cell (Attribute? Attribute = null, bool IsDirty = false, st
                 return;
             }
 
+            // Fast path: a single non-surrogate char is always exactly one grapheme. If it is already FormC, the checks
+            // below would leave it unchanged. A char that is not FormC falls through to the normalizing slow path.
+            if (value is { Length: 1 } && !char.IsSurrogate (value [0]) && IsSingleCharFormC (value))
+            {
+                _grapheme = value;
+
+                return;
+            }
+
             if (GraphemeHelper.GetGraphemeCount (value) > 1)
             {
                 throw new InvalidOperationException ($"Only a single {nameof (Grapheme)} cluster is allowed per Cell.");
@@ -57,6 +75,34 @@ public record struct Cell (Attribute? Attribute = null, bool IsDirty = false, st
                 // leave text unnormalized
                 _grapheme = value;
             }
+        }
+    }
+
+    // Returns whether the single-char string is FormC, computing and caching the answer on first use.
+    private static bool IsSingleCharFormC (string value)
+    {
+        char c = value [0];
+        byte state = _singleCharFormC [c];
+
+        if (state == SingleCharUnknown)
+        {
+            state = ComputeSingleCharFormC (value);
+            _singleCharFormC [c] = state;
+        }
+
+        return state == SingleCharNormalized;
+    }
+
+    private static byte ComputeSingleCharFormC (string value)
+    {
+        try
+        {
+            return value.IsNormalized (NormalizationForm.FormC) ? SingleCharNormalized : SingleCharNotNormalized;
+        }
+        catch (ArgumentException)
+        {
+            // Matches the slow path: text that cannot be checked is kept as-is.
+            return SingleCharNormalized;
         }
     }
 
