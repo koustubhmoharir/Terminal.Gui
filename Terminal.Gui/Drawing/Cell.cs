@@ -27,6 +27,15 @@ public record struct Cell (Attribute? Attribute = null, bool IsDirty = false, st
         readonly get => _grapheme;
         set
         {
+            // Fast path: a single BMP char below the combining marks (U+0300) is always one grapheme,
+            // is never a surrogate, and is already FormC, so the checks below would leave it unchanged.
+            if (value is { Length: 1 } && value [0] < '\u0300')
+            {
+                _grapheme = value;
+
+                return;
+            }
+
             if (GraphemeHelper.GetGraphemeCount (value) > 1)
             {
                 throw new InvalidOperationException ($"Only a single {nameof (Grapheme)} cluster is allowed per Cell.");

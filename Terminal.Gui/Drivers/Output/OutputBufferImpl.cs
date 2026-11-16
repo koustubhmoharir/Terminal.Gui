@@ -14,7 +14,7 @@ public class OutputBufferImpl : IOutputBuffer
     ///     Stable lock object for synchronizing access to <see cref="Contents"/>, <see cref="DirtyLines"/>,
     ///     <see cref="Clip"/>, and related state. Unlike locking on <c>Contents</c> itself, this object is
     ///     never replaced, guaranteeing mutual exclusion across <see cref="ClearContents()"/>,
-    ///     <see cref="AddGrapheme"/>, and <see cref="FillRect(Rectangle, Rune)"/>.
+    ///     <see cref="AddStr(string)"/>, and <see cref="FillRect(Rectangle, Rune)"/>.
     /// </summary>
     private readonly Lock _contentsLock = new ();
 
@@ -198,9 +198,32 @@ public class OutputBufferImpl : IOutputBuffer
     /// <param name="str">String.</param>
     public void AddStr (string str)
     {
-        foreach (string grapheme in GraphemeHelper.GetGraphemes (str))
+        lock (_contentsLock)
         {
-            AddGrapheme (grapheme);
+            if (Contents is null || string.IsNullOrEmpty (str))
+            {
+                return;
+            }
+
+            Clip ??= new Region (Screen);
+            Rectangle clipRect = Clip!.GetBounds ();
+            Rectangle [] clipRects = Clip!.GetRectangles ();
+
+            if (IsPrintableAscii (str))
+            {
+                // Every printable ASCII char is its own grapheme, so skip the enumerator and its allocations.
+                foreach (char c in str)
+                {
+                    AddGraphemeCore (AsciiGraphemes [c], clipRects, clipRect);
+                }
+
+                return;
+            }
+
+            foreach (string grapheme in GraphemeHelper.GetGraphemes (str))
+            {
+                AddGraphemeCore (grapheme, clipRects, clipRect);
+            }
         }
     }
 
@@ -246,24 +269,30 @@ public class OutputBufferImpl : IOutputBuffer
 
             Clip ??= new Region (Screen);
             Rectangle clipBounds = Clip!.GetBounds ();
+            Rectangle [] clipRects = Clip!.GetRectangles ();
 
             rect = Rectangle.Intersect (rect, clipBounds);
+
+            // The same for every cell, so computed once. Validity uses the raw rune's width, as it always has;
+            // drawing uses the printable grapheme's width.
+            string rawText = rune.ToString ();
+            int rawWidth = rawText.GetColumns ();
+            string grapheme = rune != default (Rune) ? rawText.MakePrintable () : " ";
+            int graphemeWidth = grapheme.GetColumns ();
 
             for (int r = rect.Y; r < rect.Y + rect.Height; r++)
             {
                 for (int c = rect.X; c < rect.X + rect.Width; c++)
                 {
-                    if (!IsValidLocation (rune.ToString (), c, r))
+                    if (!IsValidCell (rawWidth, c, r, clipRects))
                     {
                         continue;
                     }
 
-                    // We could call AddGrapheme here, but that would acquire the lock again.
-                    // So we inline the logic instead.
+                    // Inlined rather than calling a locking helper, since this method already holds the lock.
                     SetAttributeAndDirty (c, r);
                     InvalidateOverlappedWideGlyph (c, r);
-                    string grapheme = rune != default (Rune) ? rune.ToString ().MakePrintable () : " ";
-                    WriteGraphemeByWidth (c, r, grapheme, grapheme.GetColumns (), clipBounds);
+                    WriteGraphemeByWidth (c, r, grapheme, graphemeWidth, clipBounds, clipRects);
                 }
             }
         }
@@ -531,61 +560,110 @@ public class OutputBufferImpl : IOutputBuffer
     internal Rectangle Screen => new (0, 0, Cols, Rows);
 
     /// <summary>
-    ///     Adds a single grapheme to the display at the current cursor position.
+    ///     Non-locking core of <see cref="AddStr(string)"/> for one grapheme. Adds it at the current cursor position
+    ///     using the clip snapshot <paramref name="clipRects"/>. Caller must already hold <see cref="_contentsLock"/>.
     /// </summary>
     /// <param name="grapheme">The grapheme to add.</param>
-    private void AddGrapheme (string grapheme)
+    /// <param name="clipRects">The rectangles of <see cref="Clip"/>, snapshotted by the caller.</param>
+    /// <param name="clipRect">The bounds of <see cref="Clip"/>, snapshotted by the caller.</param>
+    private void AddGraphemeCore (string grapheme, Rectangle [] clipRects, Rectangle clipRect)
     {
-        lock (_contentsLock)
+        int printableGraphemeWidth = -1;
+
+        if (IsValidCell (grapheme.GetColumns (), Col, Row, clipRects))
         {
-            if (Contents is null)
-            {
-                return;
-            }
+            // Set attribute and mark dirty for current cell
+            SetAttributeAndDirty (Col, Row);
+            InvalidateOverlappedWideGlyph (Col, Row);
 
-            Clip ??= new Region (Screen);
-            Rectangle clipRect = Clip!.GetBounds ();
-
-            int printableGraphemeWidth = -1;
-
-            if (IsValidLocation (grapheme, Col, Row))
-            {
-                // Set attribute and mark dirty for current cell
-                SetAttributeAndDirty (Col, Row);
-                InvalidateOverlappedWideGlyph (Col, Row);
-
-                string printableGrapheme = grapheme.MakePrintable ();
-                printableGraphemeWidth = printableGrapheme.GetColumns ();
-                WriteGraphemeByWidth (Col, Row, printableGrapheme, printableGraphemeWidth, clipRect);
-            }
-
-            // Always advance cursor (even if location was invalid)
-            // Keep Col/Row updates inside the lock to prevent race conditions
-            Col++;
-
-            if (printableGraphemeWidth <= 1)
-            {
-                return;
-            }
-
-            // Skip the second column of a wide character
-            // See issue: https://github.com/tui-cs/Terminal.Gui/issues/4492
-            // Test: AddStr_WideGlyph_Second_Column_Attribute_Outputs_Correctly
-            // Test: AddStr_WideGlyph_Second_Column_Attribute_Set_When_In_Clip
-            if (Clip.Contains (Col, Row))
-            {
-                // Mark dirty only if the attribute is actually changing, to avoid
-                // invalidating overlapped content unnecessarily (see #4258).
-                if (Contents [Row, Col].Attribute != CurrentAttribute)
-                {
-                    Contents [Row, Col].Attribute = CurrentAttribute;
-                    MarkDirty (Col, Row);
-                }
-            }
-
-            // Advance cursor again for wide character
-            Col++;
+            string printableGrapheme = grapheme.MakePrintable ();
+            printableGraphemeWidth = printableGrapheme.GetColumns ();
+            WriteGraphemeByWidth (Col, Row, printableGrapheme, printableGraphemeWidth, clipRect, clipRects);
         }
+
+        // Always advance cursor (even if location was invalid)
+        Col++;
+
+        if (printableGraphemeWidth <= 1)
+        {
+            return;
+        }
+
+        // Skip the second column of a wide character
+        // See issue: https://github.com/tui-cs/Terminal.Gui/issues/4492
+        // Test: AddStr_WideGlyph_Second_Column_Attribute_Outputs_Correctly
+        // Test: AddStr_WideGlyph_Second_Column_Attribute_Set_When_In_Clip
+        if (ClipContains (clipRects, Col, Row))
+        {
+            // Mark dirty only if the attribute is actually changing, to avoid
+            // invalidating overlapped content unnecessarily (see #4258).
+            if (Contents! [Row, Col].Attribute != CurrentAttribute)
+            {
+                Contents [Row, Col].Attribute = CurrentAttribute;
+                MarkDirty (Col, Row);
+            }
+        }
+
+        // Advance cursor again for wide character
+        Col++;
+    }
+
+    /// <summary>
+    ///     INTERNAL: Same as <see cref="IsValidLocation(string, int, int)"/> for a text of <paramref name="textWidth"/>
+    ///     columns, but tests <paramref name="clipRects"/> instead of calling <see cref="Region.Contains(int, int)"/>.
+    /// </summary>
+    /// <param name="textWidth">The number of columns the text requires.</param>
+    /// <param name="col">The column.</param>
+    /// <param name="row">The row.</param>
+    /// <param name="clipRects">The rectangles of <see cref="Clip"/>, snapshotted by the caller.</param>
+    private bool IsValidCell (int textWidth, int col, int row, Rectangle [] clipRects) =>
+        col >= 0 && row >= 0 && col + textWidth <= Cols && row < Rows && ClipContains (clipRects, col, row);
+
+    /// <summary>INTERNAL: Returns whether any of <paramref name="clipRects"/> contains (<paramref name="col"/>, <paramref name="row"/>).</summary>
+    /// <param name="clipRects">The rectangles of the clip.</param>
+    /// <param name="col">The column.</param>
+    /// <param name="row">The row.</param>
+    private static bool ClipContains (Rectangle [] clipRects, int col, int row)
+    {
+        foreach (Rectangle clipRect in clipRects)
+        {
+            if (clipRect.Contains (col, row))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // Printable ASCII graphemes, indexed by char, so AddStr does not allocate one string per character.
+    private static readonly string [] AsciiGraphemes = CreateAsciiGraphemes ();
+
+    private static string [] CreateAsciiGraphemes ()
+    {
+        string [] graphemes = new string [128];
+
+        for (var i = 0; i < graphemes.Length; i++)
+        {
+            graphemes [i] = ((char)i).ToString ();
+        }
+
+        return graphemes;
+    }
+
+    /// <summary>INTERNAL: Returns whether <paramref name="str"/> is made only of chars 0x20 to 0x7E (no controls, DEL or non-ASCII).</summary>
+    /// <param name="str">The string to check.</param>
+    private static bool IsPrintableAscii (string str)
+    {
+        foreach (char c in str)
+        {
+            if (c is < ' ' or > '~')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -764,7 +842,8 @@ public class OutputBufferImpl : IOutputBuffer
     /// <param name="text">The printable text to write.</param>
     /// <param name="textWidth">The column width of the text.</param>
     /// <param name="clipRect">The clipping rectangle.</param>
-    private void WriteGraphemeByWidth (int col, int row, string text, int textWidth, Rectangle clipRect)
+    /// <param name="clipRects">The rectangles of the clip, snapshotted by the caller.</param>
+    private void WriteGraphemeByWidth (int col, int row, string text, int textWidth, Rectangle clipRect, Rectangle [] clipRects)
     {
         switch (textWidth)
         {
@@ -775,7 +854,7 @@ public class OutputBufferImpl : IOutputBuffer
                 break;
 
             case 2:
-                WriteWideGrapheme (col, row, text);
+                WriteWideGrapheme (col, row, text, clipRects);
 
                 break;
 
@@ -794,11 +873,12 @@ public class OutputBufferImpl : IOutputBuffer
     /// <param name="col">The column.</param>
     /// <param name="row">The row.</param>
     /// <param name="grapheme">The wide Grapheme to write.</param>
-    private void WriteWideGrapheme (int col, int row, string grapheme)
+    /// <param name="clipRects">The rectangles of the clip, snapshotted by the caller.</param>
+    private void WriteWideGrapheme (int col, int row, string grapheme, Rectangle [] clipRects)
     {
         Debug.Assert (grapheme.GetColumns () == 2);
 
-        if (!Clip!.Contains (col + 1, row))
+        if (!ClipContains (clipRects, col + 1, row))
         {
             // Second column is outside clip - can't fit wide char here
             Contents! [row, col].Grapheme = _column1ReplacementChar.ToString ();
