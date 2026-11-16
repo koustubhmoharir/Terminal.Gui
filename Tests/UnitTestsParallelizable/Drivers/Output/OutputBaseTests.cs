@@ -167,9 +167,12 @@ public class OutputBaseTests
         output.Write (buffer);
         output.ResetCounters ();
 
+        // Changed content: unchanged dirty cells match the front copy and are not sent.
         for (var row = 0; row < ROWS; row++)
         {
-            buffer.Contents! [row, 0].IsDirty = true;
+            buffer.Contents! [row, 0].Grapheme = "|";
+            buffer.Contents [row, 0].IsDirty = true;
+            buffer.Contents [row, COLS - 1].Grapheme = "|";
             buffer.Contents [row, COLS - 1].IsDirty = true;
             buffer.DirtyLines [row] = true;
         }
@@ -191,7 +194,7 @@ public class OutputBaseTests
 
     // CoPilot - GPT-5.6
     [Fact]
-    public void Write_MultipleDirtyRuns_SkipsLeadingInteriorAndTrailingCleanCells ()
+    public void Write_MultipleDirtyRuns_FillsShortGapBetweenChangedCells ()
     {
         CountingOutput output = new ();
         OutputBufferImpl buffer = new ();
@@ -199,16 +202,21 @@ public class OutputBaseTests
         output.Write (buffer);
         output.ResetCounters ();
 
-        buffer.Contents! [0, 2].IsDirty = true;
+        // Changed content: unchanged dirty cells match the front copy and are not sent.
+        buffer.Contents! [0, 2].Grapheme = "x";
+        buffer.Contents [0, 2].IsDirty = true;
+        buffer.Contents [0, 3].Grapheme = "x";
         buffer.Contents [0, 3].IsDirty = true;
+        buffer.Contents [0, 8].Grapheme = "x";
         buffer.Contents [0, 8].IsDirty = true;
         buffer.DirtyLines [0] = true;
 
         output.Write (buffer);
 
-        Point [] expectedCursorPositions = [new (0, 0), new (2, 0), new (8, 0)];
+        // The clean cells 4-7 are a gap of 4, which is filled (see MaxGap), so cells 2 and 8 share one run.
+        Point [] expectedCursorPositions = [new (0, 0), new (2, 0)];
         Assert.Equal (expectedCursorPositions, output.CursorPositions);
-        Assert.Equal (2, output.Writes);
+        Assert.Equal (1, output.Writes);
         Assert.False (buffer.Contents [0, 2].IsDirty);
         Assert.False (buffer.Contents [0, 3].IsDirty);
         Assert.False (buffer.Contents [0, 8].IsDirty);

@@ -290,6 +290,12 @@ public partial class AnsiOutput : OutputBase, IOutput, IInlineOutput
         }
     }
 
+    /// <summary>
+    ///     Gets whether the front copy can be trusted. Inline mode shares the terminal with the shell's scrollback, and a
+    ///     degraded platform does not write to a terminal, so both always send every dirty cell.
+    /// </summary>
+    internal override bool TracksTerminalContents => base.TracksTerminalContents && AppModel != AppModel.Inline && _platform != AnsiPlatform.Degraded;
+
     /// <inheritdoc cref="IOutput.Write(IOutputBuffer)"/>
     public override void Write (IOutputBuffer buffer)
     {

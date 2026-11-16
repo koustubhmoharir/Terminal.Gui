@@ -7,6 +7,11 @@ namespace Terminal.Gui.Drivers;
 /// </summary>
 public abstract class OutputBase
 {
+    // Largest number of unchanged cells held between two written cells on a row, so that one run covers both. A cursor
+    // move costs about 8 bytes and an unchanged cell costs one, so a gap of up to 8 cells is cheaper to send than a move.
+    // Longer gaps end the run and the next run starts with a cursor move.
+    private const int MaxGap = 8;
+
     /// <summary>
     ///     Whether the last <c>SetCursor</c> call reached the terminal. Subclasses reset it when a call starts and set it
     ///     only after the cursor write succeeded; <c>SetCursor</c> can return without writing (inline placement unknown,
@@ -162,6 +167,14 @@ public abstract class OutputBase
     // re-raster never blanks the placement.
     private readonly Dictionary<string, int> _kittyCurrentImageId = [];
 
+    // Front copy: what the terminal shows, as far as this output knows. A dirty cell whose content equals the front
+    // is already on screen, so it is consumed without output. _frontContents is the Contents array the front was built
+    // for; a different array (ClearContents, SetSize) means every row is unknown again. A row is known only after a frame
+    // in which every cell of it was consumed (written or skipped), or while it stays known; unknown rows are never skipped.
+    private Cell [,]? _front;
+    private Cell [,]? _frontContents;
+    private bool [] _frontRowKnown = [];
+
     /// <summary>
     ///     Writes dirty cells from the buffer to the console. Iterates rows/cols, skips clean cells,
     ///     batches dirty cells into ANSI sequences, emits OSC 8 hyperlink start/close around URL cells,
@@ -282,11 +295,81 @@ public abstract class OutputBase
         buffer.GetRasterImages ().Count > 0 || !_sixels.IsEmpty || _placedKittyImageIds.Count > 0
         || _kittyCurrentImageId.Count > 0 || _kittyDeletesToRetry.Count > 0 || _inlineUntrackedSixel || _inlineSixelPlacements.Count > 0;
 
+    /// <summary>
+    ///     Gets whether this output records what the terminal shows so that unchanged dirty cells can be skipped.
+    ///     Outputs return <see langword="false"/> when the terminal state cannot be trusted; every dirty cell is then sent.
+    /// </summary>
+    internal virtual bool TracksTerminalContents => !IsLegacyConsole;
+
     // Raw driver writes can also fail midway through an OSC/DCS control string.
     internal void InvalidatePhysicalState (IOutputBuffer buffer)
     {
         RecoverRasterState (buffer);
+        InvalidateFrontCopy ();
         _recoverOutputState = true;
+    }
+
+    // Ends the current run. Held gap cells are dropped: they are not sent, and the terminal cursor is at the end of the run.
+    private void FlushRun (Utf8Buffer outputBuffer, ref int lastCol, ref int outputWidth, ref int gapCount)
+    {
+        gapCount = 0;
+
+        if (outputWidth > 0)
+        {
+            WriteToConsole (outputBuffer, ref lastCol, ref outputWidth);
+        }
+    }
+
+    // Holds one more on-screen cell as a gap when a run is open and the gap is short enough to fill later.
+    private static bool TryHoldGap (int outputWidth, ref int gapCount)
+    {
+        if (outputWidth == 0 || gapCount >= MaxGap)
+        {
+            return false;
+        }
+
+        gapCount++;
+
+        return true;
+    }
+
+    // Marks every row unknown so the next frame sends each dirty cell in them.
+    private void InvalidateFrontCopy ()
+    {
+        Array.Fill (_frontRowKnown, false);
+    }
+
+    // Sizes the front copy to the buffer. A new Contents array or a new size makes every row unknown.
+    private void SyncFrontCopy (IOutputBuffer buffer, int rows, int cols)
+    {
+        if (ReferenceEquals (_frontContents, buffer.Contents) && _front is { } && _front.GetLength (0) == rows && _front.GetLength (1) == cols)
+        {
+            return;
+        }
+
+        _frontContents = buffer.Contents;
+
+        if (_front is null || _front.GetLength (0) != rows || _front.GetLength (1) != cols)
+        {
+            _front = new Cell [rows, cols];
+            _frontRowKnown = new bool [rows];
+        }
+
+        InvalidateFrontCopy ();
+    }
+
+    // True when sending the cell would emit exactly what the front records, so the terminal already shows it.
+    // A cell with no attribute, an empty grapheme, or a column a wide glyph covers is never considered the same.
+    private bool IsSameAsFront (int row, int col, Cell cell)
+    {
+        Cell front = _front! [row, col];
+
+        if (string.IsNullOrEmpty (cell.Grapheme) || !string.Equals (front.Grapheme, cell.Grapheme, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return cell.Attribute.HasValue && front.Attribute == cell.Attribute && cell.Grapheme.GetColumns () <= 1;
     }
 
     private void RecoverRasterState (IOutputBuffer buffer)
@@ -332,6 +415,21 @@ public abstract class OutputBase
         InvalidateRowsWithUrlsIfStale (buffer, rows, cols);
         IReadOnlyList<Rectangle> rasterCellRectangles = GetRasterCellRectangles (buffer);
 
+        // Raster images and sixels can cover cells in ways the front copy does not model. A frame with one sends every
+        // dirty cell, and the front copy is forgotten after it, so the next frame resends what the image covered.
+        bool updateFront = TracksTerminalContents;
+        bool skipUnchanged = updateFront && rasterCellRectangles.Count == 0 && buffer.GetRasterImages ().Count == 0 && GetSixels ().IsEmpty;
+
+        if (updateFront)
+        {
+            SyncFrontCopy (buffer, rows, cols);
+        }
+
+        if (!skipUnchanged)
+        {
+            InvalidateFrontCopy ();
+        }
+
         // Erase Kitty placements for images that were present last frame but are gone now. Kitty
         // placements persist until explicitly deleted, so removed images would otherwise linger.
         if (!IsLegacyConsole && UseKittyGraphics)
@@ -359,6 +457,8 @@ public abstract class OutputBase
 
             if (!SetCursorPositionImpl (0, row))
             {
+                InvalidateFrontCopy ();
+
                 return;
             }
 
@@ -369,6 +469,10 @@ public abstract class OutputBase
 
             bool rowHadUrlsPreviously = _rowsWithUrls.Contains (row);
             bool rowHasUrlsNow = !IsLegacyConsole && RowContainsUrls (buffer, row, cols);
+            bool rowTrusted = updateFront && _frontRowKnown [row];
+            bool rowSkippable = skipUnchanged && rowTrusted && !rowHasUrlsNow && !rowHadUrlsPreviously;
+            bool rowAllDirty = true;
+            int gapCount = 0;
 
             outputBuffer.Clear ();
             _lastUrl = null; // Reset URL state at the start of each row
@@ -384,25 +488,70 @@ public abstract class OutputBase
             // Process columns in row
             for (int col = left; col < cols; col++)
             {
-                // Skip clean cells, plus blank cells owned by raster images. Raster-owned
-                // blanks must not be emitted because normal text output would erase Sixel
+                // Blank cells owned by raster images must not be emitted: normal text output would erase Sixel
                 // images and is unnecessary over Kitty's transparent-cleared placement.
                 bool skipRasterBlank = IsRasterCoveredBlankCell (buffer, row, col, rasterCellRectangles);
+                Cell cell = buffer.Contents! [row, col];
 
-                if (!buffer.Contents! [row, col].IsDirty || skipRasterBlank)
+                if (skipRasterBlank)
                 {
-                    if (skipRasterBlank)
+                    rowAllDirty = false;
+                    dirtyState.ClearCell (row, col);
+                    FlushRun (outputBuffer, ref lastCol, ref outputWidth, ref gapCount);
+
+                    continue;
+                }
+
+                // A cell whose content already matches the front is on screen. Clean cells are never sent; dirty ones are
+                // consumed without output. Both can be held as a gap (see MaxGap) so the run continues over them.
+                bool onScreen = rowSkippable && IsSameAsFront (row, col, cell);
+
+                if (!cell.IsDirty)
+                {
+                    rowAllDirty = false;
+
+                    if (onScreen && TryHoldGap (outputWidth, ref gapCount))
                     {
-                        dirtyState.ClearCell (row, col);
+                        continue;
                     }
 
-                    if (outputWidth > 0)
+                    FlushRun (outputBuffer, ref lastCol, ref outputWidth, ref gapCount);
+
+                    continue;
+                }
+
+                if (onScreen)
+                {
+                    dirtyState.ClearCell (row, col);
+
+                    if (!TryHoldGap (outputWidth, ref gapCount))
                     {
-                        // This clears outputBuffer
-                        WriteToConsole (outputBuffer, ref lastCol, ref outputWidth);
+                        FlushRun (outputBuffer, ref lastCol, ref outputWidth, ref gapCount);
                     }
 
                     continue;
+                }
+
+                // A held gap is filled into a width-1 cell, so the run continues without a cursor move. A wide cell ends the
+                // run and starts a new one at its own cursor position.
+                if (gapCount > 0)
+                {
+                    if (cell.Grapheme.GetColumns () > 1)
+                    {
+                        FlushRun (outputBuffer, ref lastCol, ref outputWidth, ref gapCount);
+                    }
+                    else
+                    {
+                        int gapStart = col - gapCount;
+
+                        for (int gapCol = gapStart; gapCol < col; gapCol++)
+                        {
+                            int emittedCol = gapCol;
+                            AppendCellAnsi (buffer.Contents [row, gapCol], outputBuffer, ref redrawAttr, ref _redrawTextStyle, cols, ref emittedCol, ref outputWidth);
+                        }
+
+                        gapCount = 0;
+                    }
                 }
 
                 // Position the cursor once at the beginning of each dirty run. Clean gaps
@@ -411,6 +560,8 @@ public abstract class OutputBase
                 {
                     if (!SetCursorPositionImpl (col, row))
                     {
+                        InvalidateFrontCopy ();
+
                         return;
                     }
 
@@ -442,15 +593,25 @@ public abstract class OutputBase
 
                 // Append dirty cell as ANSI and mark clean
                 int cellCol = col;
-                Cell cell = buffer.Contents [row, col];
                 dirtyState.ClearCell (row, col);
                 AppendCellAnsi (cell, outputBuffer, ref redrawAttr, ref _redrawTextStyle, cols, ref col, ref outputWidth);
+
+                if (updateFront)
+                {
+                    _front! [row, cellCol] = new () { Attribute = cell.Attribute, Grapheme = cell.Grapheme };
+                }
 
                 if (col != cellCol)
                 {
                     // Was a wide grapheme so mark clean next cell
                     // See https://github.com/tui-cs/Terminal.Gui/issues/4466
                     dirtyState.ClearCell (row, col);
+
+                    // The second column of a wide glyph shows part of the glyph, so it is never a known match.
+                    if (updateFront)
+                    {
+                        _front! [row, col] = new ();
+                    }
                 }
             }
 
@@ -472,6 +633,13 @@ public abstract class OutputBase
             // Every dirty cell in this row has now been consumed. Drawing operations will
             // set this flag again when they modify the row in a later frame.
             dirtyState.ClearLine (row);
+
+            // A row becomes known only when every cell in it was consumed this frame, or it was already known.
+            // A partly-seen row stays unknown, so its cells that were not dirty are never trusted.
+            if (updateFront)
+            {
+                _frontRowKnown [row] = rowTrusted || rowAllDirty;
+            }
 
             // Flush buffered output for row. Even when nothing remains buffered, an OSC 8 hyperlink
             // may still be open in the terminal because it was started in a prior batch flushed by
@@ -523,6 +691,11 @@ public abstract class OutputBase
             }
             WriteEncodedString (s.SixelData);
             s.IsDirty = false;
+        }
+
+        if (!skipUnchanged)
+        {
+            InvalidateFrontCopy ();
         }
     }
 

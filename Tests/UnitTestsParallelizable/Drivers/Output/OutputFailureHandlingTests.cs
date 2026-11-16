@@ -495,6 +495,15 @@ public class OutputFailureHandlingTests
             }
         }
 
+        // Changed content, so every cell is sent again (unchanged dirty cells are skipped).
+        for (int row = 0; row < buffer.Rows; row++)
+        {
+            for (int col = 0; col < buffer.Cols; col++)
+            {
+                buffer.Contents! [row, col].Grapheme = "B";
+            }
+        }
+
         writes = 0;
         bytesWritten = 0;
         largestWrite = 0;

@@ -108,7 +108,8 @@ public class OutputPathRegressionTests
         buffer.SetSize (4, 1);
         output.Write (buffer);
         writes.Clear ();
-        buffer.Contents! [0, 2].IsDirty = true;
+        buffer.Contents! [0, 2].Grapheme = "X";
+        buffer.Contents [0, 2].IsDirty = true;
         buffer.DirtyLines [0] = true;
 
         output.Write (buffer);
