@@ -86,8 +86,8 @@ internal class FileDialogHistory (FileDialog dlg)
         {
             return false;
         }
-        _back.Push (new FileDialogState (parent, dlg));
-        dlg.PushState (parent, false);
+        // Records the folder being left (so Back returns to it) and clears Forward, like any other navigation
+        dlg.PushState (parent, true);
 
         return true;
     }

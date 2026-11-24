@@ -121,12 +121,8 @@ public partial class FileDialog
             return;
         }
 
-        FileSystemInfoStats stats = RowToStats (_tableView.Value!.SelectedCell.Y);
-
-        if (stats.FileSystemInfo is IDirectoryInfo d)
+        if (TryEnterSelectedDirectory ())
         {
-            PushState (d, true);
-
             //if (d == State?.Directory || d.FullName == State?.Directory.FullName)
             //{
             //    FinishAccept ();
@@ -134,6 +130,8 @@ public partial class FileDialog
 
             return;
         }
+
+        FileSystemInfoStats stats = RowToStats (_tableView.Value!.SelectedCell.Y);
 
         if (stats.FileSystemInfo is IFileInfo f)
         {
@@ -261,14 +259,26 @@ public partial class FileDialog
 
     private static string StripArrows (string columnName) => columnName.Replace (" (▼)", string.Empty).Replace (" (▲)", string.Empty);
 
+    // Navigation keys: Backspace / Alt+Left = back, Shift+Backspace / Alt+Right = forward,
+    // Left / Alt+Up = up to parent, Right = enter the selected directory (file rows fall through to the TableView).
     // TODO: Port this to use key bindings
     private bool TableView_KeyDown (Key keyEvent)
     {
         switch (keyEvent.KeyCode)
         {
-            case KeyCode.Backspace: return _history.Back ();
+            case KeyCode.Backspace:
+            case KeyCode.AltMask | KeyCode.CursorLeft: return _history.Back ();
 
-            case KeyCode.ShiftMask | KeyCode.Backspace: return _history.Forward ();
+            case KeyCode.ShiftMask | KeyCode.Backspace:
+            case KeyCode.AltMask | KeyCode.CursorRight: return _history.Forward ();
+
+            case KeyCode.CursorLeft:
+            case KeyCode.AltMask | KeyCode.CursorUp:
+                _history.Up ();
+
+                return true;
+
+            case KeyCode.CursorRight: return TryEnterSelectedDirectory ();
 
             case KeyCode.Delete:
                 Delete ();
@@ -318,6 +328,29 @@ public partial class FileDialog
         {
             _pushingState = false;
         }
+    }
+
+    /// <summary>
+    /// If the selected row is a directory (including the parent <c>..</c> row), enters it and returns <see langword="true"/>.
+    /// Otherwise (file row, no selection or empty table) returns <see langword="false"/>.
+    /// </summary>
+    private bool TryEnterSelectedDirectory ()
+    {
+        if (_tableView.Value is null || _tableView.Table?.Rows == 0)
+        {
+            return false;
+        }
+
+        FileSystemInfoStats stats = RowToStats (_tableView.Value.SelectedCell.Y);
+
+        if (stats.FileSystemInfo is not IDirectoryInfo d)
+        {
+            return false;
+        }
+
+        PushState (d, true);
+
+        return true;
     }
 
     private void WriteStateToTableView ()

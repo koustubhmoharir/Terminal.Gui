@@ -455,4 +455,171 @@ public class FileDialogTests : TestsAllDrivers
 
         c.Stop ();
     }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_TableView_Right_OnDirectory_EntersAndLeft_GoesToParent (string d)
+    {
+        SaveDialog? sd = null;
+        MockFileSystem? fs = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialog (out sd, out fs), 100, 20, d)
+                                    .Then (_ =>
+                                          {
+                                              sd!.Path = GetFileSystemRoot (fs!);
+                                          })
+                                    .Focus<TableView> (_ => true)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("logs", sd!.Path);
+                                          })
+                                    .KeyDown (Key.CursorLeft)
+                                    .Then (_ =>
+                                          {
+                                              Assert.DoesNotContain ("logs", sd!.Path);
+                                          });
+
+        c.Stop ();
+    }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_TableView_AltUp_GoesToParent (string d)
+    {
+        SaveDialog? sd = null;
+        MockFileSystem? fs = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialog (out sd, out fs), 100, 20, d)
+                                    .Then (_ =>
+                                          {
+                                              sd!.Path = GetFileSystemRoot (fs!);
+                                          })
+                                    .Focus<TableView> (_ => true)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("logs", sd!.Path);
+                                          })
+                                    .KeyDown (Key.CursorUp.WithAlt)
+                                    .Then (_ =>
+                                          {
+                                              Assert.DoesNotContain ("logs", sd!.Path);
+                                          });
+
+        c.Stop ();
+    }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_TableView_Right_OnFile_DoesNotChangeDirectory (string d)
+    {
+        SaveDialog? sd = null;
+        MockFileSystem? fs = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialog (out sd, out fs), 100, 20, d)
+                                    .Then (_ =>
+                                          {
+                                              sd!.Path = GetFileSystemRoot (fs!);
+                                          })
+                                    .Focus<TableView> (_ => true)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("test-dir", sd!.Path);
+                                          })
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .Then (_ =>
+                                          {
+                                              // Path holds the selected file name, so check the folder it sits in
+                                              Assert.EndsWith ("file1.txt", sd!.Path);
+                                              Assert.Contains ("test-dir", sd.Path);
+                                              Assert.DoesNotContain ("sub-dir", sd.Path);
+                                          });
+
+        c.Stop ();
+    }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_TableView_AltLeft_ReturnsAndAltRight_ReEnters (string d)
+    {
+        SaveDialog? sd = null;
+        MockFileSystem? fs = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialog (out sd, out fs), 100, 20, d)
+                                    .Then (_ =>
+                                          {
+                                              sd!.Path = GetFileSystemRoot (fs!);
+                                          })
+                                    .Focus<TableView> (_ => true)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("logs", sd!.Path);
+                                          })
+                                    .KeyDown (Key.CursorLeft.WithAlt)
+                                    .Then (_ =>
+                                          {
+                                              Assert.DoesNotContain ("logs", sd!.Path);
+                                          })
+                                    .KeyDown (Key.CursorRight.WithAlt)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("logs", sd!.Path);
+                                          });
+
+        c.Stop ();
+    }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_TableView_Left_ThenAltLeft_ReturnsToSubFolder (string d)
+    {
+        SaveDialog? sd = null;
+        MockFileSystem? fs = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialog (out sd, out fs), 100, 20, d)
+                                    .Then (_ =>
+                                          {
+                                              sd!.Path = GetFileSystemRoot (fs!);
+                                          })
+                                    .Focus<TableView> (_ => true)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .KeyDown (Key.CursorDown)
+                                    .KeyDown (Key.CursorRight)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("sub-dir", sd!.Path);
+                                          })
+                                    .KeyDown (Key.CursorLeft)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("test-dir", sd!.Path);
+                                              Assert.DoesNotContain ("sub-dir", sd.Path);
+                                          })
+                                    .KeyDown (Key.CursorLeft.WithAlt)
+                                    .Then (_ =>
+                                          {
+                                              Assert.Contains ("sub-dir", sd!.Path);
+                                          });
+
+        c.Stop ();
+    }
 }
