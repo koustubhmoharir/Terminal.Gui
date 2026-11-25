@@ -104,6 +104,12 @@ public class FileDialogStyle
     /// <summary>Gets or sets the header text displayed in the Modified column of the files table.</summary>
     public string ModifiedColumnName { get; set; } = Strings.fdModified;
 
+    /// <summary>
+    ///     Gets or sets a line of key hints shown at the bottom of the dialog, above the buttons. Empty (the default)
+    ///     shows no line.
+    /// </summary>
+    public string KeyHints { get; set; } = string.Empty;
+
     /// <summary>Gets or sets the text on the 'Ok' button.  Typically, you may want to change this to "Open" or "Save" etc.</summary>
     public string OkButtonText { get; set; } = Strings.btnOk;
 

@@ -622,4 +622,73 @@ public class FileDialogTests : TestsAllDrivers
 
         c.Stop ();
     }
+
+    private IRunnable NewSaveDialogWithKeyHints (out SaveDialog sd, string keyHints)
+    {
+        IRunnable r = NewSaveDialog (out sd, out MockFileSystem _);
+        sd.Style.KeyHints = keyHints;
+
+        return r;
+    }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_KeyHints_ShowsLineAboveTableContainer (string d)
+    {
+        const string hints = "Alt+←/→ Back/Forward  ^N New folder  ^R Rename  Del Delete";
+        SaveDialog? sd = null;
+        string? screen = null;
+        View? keyHints = null;
+        View? tableContainer = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialogWithKeyHints (out sd, hints), 100, 20, d)
+                                    .WaitIteration ()
+                                    .Then (app =>
+                                          {
+                                              keyHints = sd!.SubViews.First (v => v.Id == "_keyHints");
+                                              tableContainer = sd.SubViews.First (v => v.Id == "_tableViewContainer");
+                                              screen = app.Driver!.ToString ();
+                                          });
+
+        Assert.NotNull (keyHints);
+        Assert.NotNull (tableContainer);
+        Assert.True (keyHints!.Visible);
+        Assert.Equal (hints, ((Label)keyHints).Text);
+
+        // The hint row is inside the dialog's content area and below the table container
+        Assert.True (keyHints.Frame.Bottom <= sd!.Viewport.Height);
+        Assert.True (tableContainer!.Frame.Bottom <= keyHints.Frame.Y);
+        Assert.Contains (hints, screen);
+
+        c.Stop ();
+    }
+
+    // Claude - Haiku 5.5
+    [Theory]
+    [MemberData (nameof (GetAllDriverNames))]
+    public void SaveFileDialog_KeyHints_DefaultEmpty_HidesLineAndKeepsTableContainerFullHeight (string d)
+    {
+        SaveDialog? sd = null;
+        string? screen = null;
+        View? keyHints = null;
+        View? tableContainer = null;
+
+        using AppTestHelper c = With.A (() => NewSaveDialog (out sd), 100, 20, d)
+                                    .WaitIteration ()
+                                    .Then (app =>
+                                          {
+                                              keyHints = sd!.SubViews.First (v => v.Id == "_keyHints");
+                                              tableContainer = sd.SubViews.First (v => v.Id == "_tableViewContainer");
+                                              screen = app.Driver!.ToString ();
+                                          });
+
+        Assert.NotNull (keyHints);
+        Assert.NotNull (tableContainer);
+        Assert.False (keyHints!.Visible);
+        Assert.Equal (sd!.Viewport.Height, tableContainer!.Frame.Bottom);
+        Assert.DoesNotContain ("New folder", screen);
+
+        c.Stop ();
+    }
 }

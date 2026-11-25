@@ -52,6 +52,7 @@ public partial class FileDialog : Dialog<IReadOnlyList<string>?>, IDesignable
     private readonly FileDialogHistory _history;
     private readonly SpinnerView _spinnerView;
     private readonly View _tableViewContainer;
+    private readonly Label _keyHints;
     private readonly TableView _tableView;
     private readonly TextField _tbFind;
     private readonly TextField _tbPath;
@@ -154,6 +155,18 @@ public partial class FileDialog : Dialog<IReadOnlyList<string>?>, IDesignable
             TabStop = TabBehavior.TabStop,
             CanFocus = true,
             Id = "_tableViewContainer"
+        };
+
+        // Key hint line - sits in the last row of the content area, above the buttons. Only shown when
+        // Style.KeyHints is set (see EndInit), in which case the table container leaves this row free.
+        _keyHints = new Label
+        {
+            X = 0,
+            Y = Pos.AnchorEnd (1),
+            Width = Dim.Fill (),
+            Height = 1,
+            Visible = false,
+            Id = "_keyHints"
         };
 
         // Tree toggle button - Goes in Dialog Button Area
@@ -287,6 +300,8 @@ public partial class FileDialog : Dialog<IReadOnlyList<string>?>, IDesignable
         _tableViewContainer.Add (_tbFind);
         _tableViewContainer.Add (_spinnerView);
 
+        Add (_keyHints);
+
         // to streamline user experience and allow direct typing of paths
         // with zero navigation we start with focus in the text box and any
         // default/current path fully selected and ready to be overwritten
@@ -308,6 +323,7 @@ public partial class FileDialog : Dialog<IReadOnlyList<string>?>, IDesignable
         _btnForward.Text = GetForwardButtonText ();
         _tbPath.Title = Style.PathCaption;
         _tbFind.Title = Style.SearchCaption;
+        ApplyKeyHints ();
         _treeRoots = Style.TreeRootGetter ();
         Style.IconProvider.IsOpenGetter = _treeView.IsExpanded;
         _treeView.AddObjects (_treeRoots.Keys);
@@ -340,6 +356,17 @@ public partial class FileDialog : Dialog<IReadOnlyList<string>?>, IDesignable
         {
             Title = GetDefaultTitle ();
         }
+    }
+
+    // Shows the key hint row when Style.KeyHints is set; otherwise the row is hidden and the table container
+    // fills the content area as it did before the hint row existed.
+    private void ApplyKeyHints ()
+    {
+        bool hasHints = !string.IsNullOrEmpty (Style.KeyHints);
+
+        _keyHints.Text = Style.KeyHints;
+        _keyHints.Visible = hasHints;
+        _tableViewContainer.Height = hasHints ? Dim.Fill (1) : Dim.Fill ();
     }
 
     /// <summary>
